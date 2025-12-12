@@ -40,7 +40,7 @@ SYSTEM_PROMPT_02 = _safe_read_prompt("prompt_02.txt")
 # 只有在这个列表中的群号才会启用 Bot 功能
 GROUP_WHITELIST = [
     694590185,  # 自己的群
-    #1032758463, # 悠游
+    1032758463, # 悠游
     152103400, #csqaq 网站交流群
     # 添加更多群号...
 ]
@@ -51,6 +51,8 @@ GROUP_WHITELIST = [
 gpt_client = None
 llm_client = None
 conversation_history = {}  # 存储对话历史
+REPLY_ALL = False
+IGNORE_WHITELIST = False
 
 
 def init_gpt_client():
@@ -71,7 +73,7 @@ def get_gpt_response(user_id, message):
         # 初始化用户对话历史
         if user_id not in conversation_history:
             conversation_history[user_id] = [
-                {"role": "system", "content": SYSTEM_PROMPT}
+                {"role": "system", "content": SYSTEM_PROMPT_02}
             ]
             print(f"✓ 已为用户 {user_id} 初始化对话历史")
         
@@ -129,7 +131,7 @@ def get_llm_response(user_id, message):
         # 初始化用户对话历史
         if user_id not in conversation_history:
             conversation_history[user_id] = [
-                {"role": "system", "content": SYSTEM_PROMPT}
+                {"role": "system", "content": SYSTEM_PROMPT_02}
             ]
             print(f"✓ 已为用户 {user_id} 初始化对话历史")
         
@@ -141,8 +143,8 @@ def get_llm_response(user_id, message):
         
         # 调用 openrouter API
         response = llm_client.chat.completions.create(
-            model="tngtech/deepseek-r1t2-chimera:free",
-            #model="kwaipilot/kat-coder-pro:free",
+            #model="tngtech/deepseek-r1t2-chimera:free",
+            model="kwaipilot/kat-coder-pro:free",
             # model="nvidia/nemotron-nano-12b-v2-vl:free",
             messages=conversation_history[user_id],
             max_tokens=500,
@@ -277,10 +279,10 @@ async def listen_and_respond(responder):
                         print(f"   Message 结构: {message_data}")
                         print(f"   Self ID: {self_id}")
                         
-                        # # ✅ 检查群号是否在白名单中
-                        # if not is_group_whitelisted(group_id):
-                        #     print(f"   ❌ 群号不在白名单中，跳过处理")
-                        #     continue
+                        # ✅ 检查群号是否在白名单中（可选关闭）
+                        if not IGNORE_WHITELIST and not is_group_whitelisted(group_id):
+                            print(f"   ❌ 群号不在白名单中，跳过处理")
+                            continue
                         
                         # ✅ 检查是否被@了（改进版）
                         mentioned = is_mentioned(data)
@@ -334,7 +336,8 @@ async def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", choices=["gpt", "openrouter"], default="openrouter", help="选择后端: gpt 或 openrouter")
-    parser.add_argument("--aggressive", action="store_true", help="暴力模式：回复所有群消息，无需 @ 提及")
+    parser.add_argument("--reply-all", action="store_true", help="暴力模式：回复所有群消息，无需 @ 提及")
+    parser.add_argument("--ignore-whitelist", action="store_true", help="忽略群白名单，所有群都回复")
     args = parser.parse_args()
 
     if args.backend == "gpt":
@@ -346,6 +349,8 @@ async def main():
 
     global REPLY_ALL
     REPLY_ALL = bool(args.aggressive)
+    global IGNORE_WHITELIST
+    IGNORE_WHITELIST = bool(args.ignore_whitelist)
     await listen_and_respond(responder)
 
 
