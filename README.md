@@ -17,11 +17,11 @@
 ```python
 # WebSocket 接收器配置
 WS_URL = "ws://127.0.0.1:3001/ws"
-WS_TOKEN = "123456"
+WS_TOKEN = "your websocket token created and copied from napcat webui"
 
 # HTTP API 配置（发送消息）
 API_URL = "http://127.0.0.1:3000"
-API_TOKEN = "your-api-token"
+API_TOKEN = "your-api-token "
 
 # GPT API 配置
 GPT_API_KEY = "your-openai-api-key"
