@@ -40,6 +40,37 @@ GPT_MODEL = "gpt-3.5-turbo"
 uv run run.py
 ```
 
+## MCP Integration
+
+Two helper modules provide MCP connectivity so `qqbot.py` can call tools:
+
+- `mcp_comm.py`: Lightweight async wrapper with `MCPClient.call_tool()` and `list_tools()`.
+- `mcp_registry.py`: Registry and `build_http_transport()` to register servers.
+
+### Quick Start (File-based config)
+
+1. Define MCP servers in [cs2QQBotDirector/mcp_servers.json](cs2QQBotDirector/mcp_servers.json):
+
+```
+{
+	"servers": [
+		{ "id": "weather", "type": "http", "base_url": "http://localhost:8080" }
+	]
+}
+```
+
+2. Use in `qqbot.py`:
+
+```python
+from mcp_registry import default_registry
+from mcp_comm import MCPClient
+
+reg = default_registry("mcp_servers.json")
+client = MCPClient(reg.get_transport("weather"))
+result = await client.call_tool("weather", "get_forecast", {"city": "Tokyo"})
+```
+
+You can add more servers via `MCPRegistry.register()`.
 ## 工作流程
 
 1. Bot 启动并连接到 NapCat WebSocket 服务
