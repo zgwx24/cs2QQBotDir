@@ -1,86 +1,99 @@
-# NapCat QQ GPT Bot
+# 域名购买后 DNS 配置指南
 
-一个集成了 GPT API 的 QQ 机器人，可以自动接收群消息和私聊消息，并使用 GPT 进行智能回复。
+本文介绍在成功购买域名后，如何完成常见的 DNS（域名系统）配置步骤，帮助域名正确指向网站、服务器或第三方服务。
 
-## 功能
+---
 
-- ✅ 实时监听 QQ 消息（群消息和私聊）
-- ✅ 调用 OpenAI GPT API 进行智能回复
-- ✅ 支持对话历史，维持多轮对话上下文
-- ✅ 自动发送回复消息
-- ✅ 独立的用户对话管理
+## 一、什么是 DNS
 
-## 配置
+DNS（Domain Name System）用于将域名解析为 IP 地址。用户在浏览器中输入域名时，DNS 会告诉浏览器应访问哪一台服务器。
 
-在 `run.py` 中修改以下配置：
+---
 
-```python
-# WebSocket 接收器配置
-WS_URL = "ws://127.0.0.1:3001/ws"
-WS_TOKEN = "your websocket token created and copied from napcat webui"
+## 二、进入域名管理后台
 
-# HTTP API 配置（发送消息）
-API_URL = "http://127.0.0.1:3000"
-API_TOKEN = "your-api-token "
+1. 登录域名注册商的管理控制台  
+2. 找到「域名管理」或「我的域名」  
+3. 选择需要配置的域名  
+4. 进入「DNS 管理」「解析设置」或类似页面  
 
-# GPT API 配置
-GPT_API_KEY = "your-openai-api-key"
-GPT_MODEL = "gpt-3.5-turbo"
-```
+---
 
-## 依赖
+## 三、选择 DNS 托管方式
 
-- websockets>=12.0,<14
-- requests>=2.31.0
-- openai>=1.0.0
+通常有两种方式：
 
-## 使用
+### 方式一：使用注册商默认 DNS（推荐新手）
+- 直接在当前平台添加解析记录
+- 操作简单，生效快
 
-```bash
-uv run run.py
-```
+### 方式二：使用第三方 DNS 服务
+- 将域名的 NS 服务器修改为第三方提供的地址
+- 常用于需要高级功能（如 CDN、DDoS 防护等）的场景
 
-## MCP Integration
+---
 
-Two helper modules provide MCP connectivity so `qqbot.py` can call tools:
+## 四、常见 DNS 记录类型说明
 
-- `mcp_comm.py`: Lightweight async wrapper with `MCPClient.call_tool()` and `list_tools()`.
-- `mcp_registry.py`: Registry and `build_http_transport()` to register servers.
+| 记录类型 | 用途说明 |
+|--------|----------|
+| A      | 将域名指向 IPv4 地址 |
+| AAAA   | 将域名指向 IPv6 地址 |
+| CNAME  | 将域名指向另一个域名 |
+| MX     | 邮件服务器配置 |
+| TXT    | 用于验证、配置 SPF 等 |
+| NS     | 指定域名使用的 DNS 服务器 |
 
-### Quick Start (File-based config)
+---
 
-1. Define MCP servers in [cs2QQBotDirector/mcp_servers.json](cs2QQBotDirector/mcp_servers.json):
+## 五、基础网站解析示例
 
-```
-{
-	"servers": [
-		{ "id": "weather", "type": "http", "base_url": "http://localhost:8080" }
-	]
-}
-```
+### 1. 配置根域名（如 example.com）
 
-2. Use in `qqbot.py`:
+添加一条 **A 记录**：
+- 主机记录：`@`
+- 记录类型：`A`
+- 记录值：服务器 IPv4 地址
+- TTL：默认即可
 
-```python
-from mcp_registry import default_registry
-from mcp_comm import MCPClient
+### 2. 配置 www 子域名（如 www.example.com）
 
-reg = default_registry("mcp_servers.json")
-client = MCPClient(reg.get_transport("weather"))
-result = await client.call_tool("weather", "get_forecast", {"city": "Tokyo"})
-```
+添加一条 **CNAME 记录**：
+- 主机记录：`www`
+- 记录类型：`CNAME`
+- 记录值：`example.com`
+- TTL：默认即可
 
-You can add more servers via `MCPRegistry.register()`.
-## 工作流程
+---
 
-1. Bot 启动并连接到 NapCat WebSocket 服务
-2. 监听 QQ 群消息和私聊消息
-3. 接收消息后，调用 OpenAI GPT API 获取回复
-4. 通过 NapCat HTTP API 将回复发送回 QQ
-5. 维持对话历史以支持多轮交互
+## 六、配置邮箱解析（可选）
 
-## 注意事项
+如需使用域名邮箱，需要按照邮箱服务商提供的说明添加：
+- MX 记录
+- 相关 TXT 记录（用于验证和防垃圾邮件）
 
-- 需要配置有效的 OpenAI API Key
-- 需要 NapCat 服务在 `127.0.0.1:3001` 和 `127.0.0.1:3000` 运行
-- API 调用会产生费用，注意 API 额度
+不同服务商配置略有差异，应以官方文档为准。
+
+---
+
+## 七、等待 DNS 生效
+
+- DNS 修改通常在 **几分钟到 48 小时** 内生效
+- 可使用在线 DNS 查询工具检查解析状态
+- 在全球范围内完全生效可能需要更长时间
+
+---
+
+## 八、常见问题排查
+
+- 网站无法访问：检查 IP 是否正确、防火墙是否放行端口
+- 修改未生效：确认是否清除了旧记录或存在冲突
+- 使用 CDN/第三方 DNS：确认 NS 是否已正确修改
+
+---
+
+## 九、总结
+
+完成域名购买后，正确配置 DNS 是网站上线的重要一步。只要理解基本记录类型，并按需添加解析记录，就可以让域名顺利指向目标服务。
+
+如有特殊需求，建议参考对应服务商的官方文档进行配置。
