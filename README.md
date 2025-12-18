@@ -1,4 +1,4 @@
-# NapCat QQ GPT Bot
+# NapCat QQ GPT Bot LOVE YOU ZYL
 
 一个集成了 GPT API 的 QQ 机器人，可以自动接收群消息和私聊消息，并使用 GPT 进行智能回复。
 
