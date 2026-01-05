@@ -45,11 +45,25 @@ GROUP_WHITELIST = [
     # 694590185,  # 自己的群
     # 1032758463, # 悠游
     152103400, #csqaq 网站交流群
-    615988021, #fbw 9群
+    #615988021, #fbw 9群
     # 添加更多群号...
 ]
 # 设置为 None 或 [] 表示全部群都启用
 # GROUP_WHITELIST = None  # 或者 GROUP_WHITELIST = []
+
+# ==================== 用户白名单配置 ====================
+# 基于数字账号的群聊回复白名单
+# 只有在这个列表中的用户才会收到群聊回复
+USER_WHITELIST = {
+    # 152103400: [123456789, 987654321],  # 群号: [用户QQ号列表]
+}
+
+# ==================== 管理员账号配置 ====================
+# 管理员可以通过 mention 用户并说"攻击他"、"给我上"等关键词来添加白名单
+ADMIN_ACCOUNT = 635818639 # 请填写管理员QQ账号（数字）
+
+# 触发添加白名单的关键词
+ADD_WHITELIST_KEYWORDS = ["攻击他", "给我上", "加入白名单"]
 
 # ==================== 全局变量 ====================
 gpt_client = None
@@ -194,6 +208,8 @@ def send_group_message(group_id, message):
             "Authorization": f"Bearer {API_TOKEN}",
             "Content-Type": "application/json"
         }
+        # 移除消息前后的换行符
+        message = message.strip()
         data = {
             "group_id": group_id,
             "message": message
@@ -214,6 +230,8 @@ def send_private_message(user_id, message):
             "Authorization": f"Bearer {API_TOKEN}",
             "Content-Type": "application/json"
         }
+        # 移除消息前后的换行符
+        message = message.strip()
         data = {
             "user_id": user_id,
             "message": message
@@ -226,21 +244,55 @@ def send_private_message(user_id, message):
         return None
 
 
-def is_mentioned(data):
-    """检查机器人是否被@了"""
-    self_id = data.get("self_id")
+def is_user_in_whitelist(group_id, user_id):
+    """检查用户是否在群的白名单中"""
+    if group_id not in USER_WHITELIST:
+        return False
+    return user_id in USER_WHITELIST[group_id]
+
+
+def add_user_to_whitelist(group_id, user_id):
+    """添加用户到群的白名单"""
+    if group_id not in USER_WHITELIST:
+        USER_WHITELIST[group_id] = []
+    if user_id not in USER_WHITELIST[group_id]:
+        USER_WHITELIST[group_id].append(user_id)
+        print(f"✓ 已添加用户 {user_id} 到群 {group_id} 的白名单")
+        return True
+    return False
+
+
+def check_admin_command_add_whitelist(data):
+    """检查管理员是否发出了添加白名单的命令
+    
+    命令格式: 管理员 mention 用户并说出关键词如"攻击他"、"给我上"等
+    """
+    if ADMIN_ACCOUNT == 0:
+        return False  # 管理员账号未配置
+    
+    user_id = data.get("user_id")
+    if user_id != ADMIN_ACCOUNT:
+        return False  # 不是管理员
+    
     raw_message = data.get("raw_message", "")
     
-    # 方法 1: 检查 CQCode 格式的 @ ([CQ:at,qq=xxxxx])
-    if f"[CQ:at,qq={self_id}]" in raw_message:
-        return True
+    # 检查是否包含关键词
+    has_keyword = any(keyword in raw_message for keyword in ADD_WHITELIST_KEYWORDS)
+    if not has_keyword:
+        return False
     
-    # 方法 2: 检查 message 数组格式（如果支持的话）
-    message = data.get("message", [])
-    if isinstance(message, list):
-        for item in message:
-            if item.get("type") == "at" and item.get("data", {}).get("qq") == self_id:
-                return True
+    # 检查是否 mention 了用户
+    import re
+    matches = re.findall(r"\[CQ:at,qq=(\d+)\]", raw_message)
+    
+    if matches:
+        group_id = data.get("group_id")
+        # 添加所有被 mention 的用户到白名单
+        for target_user_id in matches:
+            target_user_id = int(target_user_id)
+            if target_user_id != ADMIN_ACCOUNT:  # 不添加管理员自己
+                add_user_to_whitelist(group_id, target_user_id)
+        return True
     
     return False
 
@@ -263,92 +315,113 @@ def is_group_whitelisted(group_id):
     return group_id in GROUP_WHITELIST
 
 
-async def listen_and_respond(responder):
-    """监听消息并使用 GPT 回复"""
-    extra_headers = [("Authorization", f"Bearer {WS_TOKEN}")]
-    
-    try:
-        async with websockets.connect(WS_URL, extra_headers=extra_headers) as ws:
-            print("✓ WebSocket 连接成功，等待消息...")
-            while True:
-                message = await ws.recv()
-                data = json.loads(message)
+def handle_message(data, responder):
+    """处理接收到的消息"""
+    # 只处理消息事件
+    if data.get("post_type") == "message":
+        msg_type = data.get("message_type")
+        
+        if msg_type == "group":
+            # 群消息处理
+            group_id = data.get("group_id")
+            user_id = data.get("user_id")
+            self_id = data.get("self_id")
+            raw_message = data.get("raw_message", "")
+            message_data = data.get("message", [])
+            
+            # 🔍 调试：打印完整消息结构（静默模式下跳过）
+            if not QUIET_MODE:
+                print(f"📨 群消息 [{group_id}] 来自用户 {user_id}:")
+                print(f"   Raw: {raw_message}")
+                print(f"   Message 结构: {message_data}")
+                print(f"   Self ID: {self_id}")
+            
+            # ✅ 检查群号是否在白名单中（可选关闭）
+            if not IGNORE_WHITELIST and not is_group_whitelisted(group_id):
+                if not QUIET_MODE:
+                    print(f"   ❌ 群号不在白名单中，跳过处理")
+                return
+            
+            # ✅ 检查是否是管理员的添加白名单命令
+            if check_admin_command_add_whitelist(data):
+                if not QUIET_MODE:
+                    print(f"   ✓ 管理员已添加白名单用户")
+                return
+            
+            # ✅ 检查用户是否在白名单中
+            in_whitelist = is_user_in_whitelist(group_id, user_id)
+            if not QUIET_MODE:
+                print(f"   白名单检查: {in_whitelist}")
+
+            # 若启用暴力模式（回复所有消息），则无需白名单
+            should_reply = in_whitelist or REPLY_ALL
+
+            if should_reply:
+                # 提取纯文本内容（去掉@标签）
+                text_content = extract_text_from_message(raw_message)
                 
-                # 只处理消息事件
-                if data.get("post_type") == "message":
-                    msg_type = data.get("message_type")
-                    
-                    if msg_type == "group":
-                        # 群消息处理
-                        group_id = data.get("group_id")
-                        user_id = data.get("user_id")
-                        self_id = data.get("self_id")
-                        raw_message = data.get("raw_message", "")
-                        message_data = data.get("message", [])
-                        
-                        # 🔍 调试：打印完整消息结构（静默模式下跳过）
-                        if not QUIET_MODE:
-                            print(f"\n📨 群消息 [{group_id}] 来自用户 {user_id}:")
-                            print(f"   Raw: {raw_message}")
-                            print(f"   Message 结构: {message_data}")
-                            print(f"   Self ID: {self_id}")
-                        
-                        # ✅ 检查群号是否在白名单中（可选关闭）
-                        if not IGNORE_WHITELIST and not is_group_whitelisted(group_id):
-                            if not QUIET_MODE:
-                                print(f"   ❌ 群号不在白名单中，跳过处理")
-                            continue
-                        
-                        # ✅ 检查是否被@了（改进版）
-                        mentioned = is_mentioned(data)
-                        if not QUIET_MODE:
-                            print(f"   @检测结果: {mentioned}")
+                if not QUIET_MODE:
+                    print(f"   ✅ 用户在白名单中，调用 LLM...")
+                    print(f"   提取内容: {text_content}")
+                
+                reply = responder(f"group_{group_id}_{user_id}", text_content)
+                
+                if not QUIET_MODE:
+                    print(f"   LLM 回复: {reply}")
+                
+                # 发送回复
+                send_group_message(group_id, reply)
+            else:
+                if not QUIET_MODE:
+                    print(f"   ⏭️  用户不在白名单中，跳过处理")
+        
+        elif msg_type == "private":
+            # 私聊消息处理（私聊总是回复，不需要@）
+            user_id = data.get("user_id")
+            raw_message = data.get("raw_message", "")
+            
+            if not QUIET_MODE:
+                print(f"💬 私信 来自用户 {user_id}:")
+                print(f"   内容: {raw_message}")
+                print(f"   调用 LLM...")
+            
+            # 调用 LLM 获取回复
+            reply = responder(f"private_{user_id}", raw_message)
+            
+            if not QUIET_MODE:
+                print(f"   LLM 回复: {reply}")
+            
+            # 发送回复
+            send_private_message(user_id, reply)
 
-                        # 若启用暴力模式（回复所有消息），则无需 @
-                        should_reply = mentioned or REPLY_ALL
 
-                        if should_reply:
-                            # 提取纯文本内容（去掉@标签）
-                            text_content = extract_text_from_message(raw_message)
-                            
-                            if not QUIET_MODE:
-                                print(f"   ✅ 被@了，调用 LLM...")
-                                print(f"   提取内容: {text_content}")
-                            
-                            reply = responder(f"group_{group_id}_{user_id}", text_content)
-                            
-                            if not QUIET_MODE:
-                                print(f"   LLM 回复: {reply}")
-                            
-                            # 发送回复
-                            send_group_message(group_id, reply)
-                        else:
-                            if not QUIET_MODE:
-                                print(f"   ⏭️  未被@，跳过处理")
-                    
-                    elif msg_type == "private":
-                        # 私聊消息处理（私聊总是回复，不需要@）
-                        user_id = data.get("user_id")
-                        raw_message = data.get("raw_message", "")
-                        
-                        if not QUIET_MODE:
-                            print(f"\n💬 私信 来自用户 {user_id}:")
-                            print(f"   内容: {raw_message}")
-                            print(f"   调用 LLM...")
-                        
-                        # 调用 LLM 获取回复
-                        reply = responder(f"private_{user_id}", raw_message)
-                        
-                        if not QUIET_MODE:
-                            print(f"   LLM 回复: {reply}")
-                        
-                        # 发送回复
-                        send_private_message(user_id, reply)
+async def listen_and_respond(responder):
+    """监听消息并使用 GPT 回复（自动重连）"""
+    extra_headers = [("Authorization", f"Bearer {WS_TOKEN}")]
+    reconnect_delay = 5  # 初始重连延迟（秒）
+    max_reconnect_delay = 60  # 最大重连延迟
     
-    except websockets.exceptions.ConnectionClosed:
-        print("✗ WebSocket 连接已关闭")
-    except Exception as e:
-        print(f"✗ 错误: {str(e)}")
+    while True:
+        try:
+            async with websockets.connect(WS_URL, extra_headers=extra_headers) as ws:
+                print("✓ WebSocket 连接成功，等待消息...")
+                reconnect_delay = 5  # 连接成功后重置延迟
+                
+                while True:
+                    message = await ws.recv()
+                    data = json.loads(message)
+                    handle_message(data, responder)
+    
+        except websockets.exceptions.ConnectionClosed:
+            print(f"✗ WebSocket 连接已关闭，{reconnect_delay}秒后尝试重连...")
+        except Exception as e:
+            print(f"✗ 错误: {str(e)}，{reconnect_delay}秒后尝试重连...")
+        
+        # 等待后重连
+        await asyncio.sleep(reconnect_delay)
+        # 增加延迟时间（指数退避），防止频繁重连
+        reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
+        reconnect_delay = int(reconnect_delay)
 
 
 async def main():
