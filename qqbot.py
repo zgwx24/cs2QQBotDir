@@ -37,14 +37,14 @@ def _safe_read_prompt(filename: str) -> str:
     return ""
 
 
-SYSTEM_PROMPT = _safe_read_prompt("prompt_attack.txt")
+SYSTEM_PROMPT = _safe_read_prompt("prompt_smart.txt")
 # 仅使用 prompt.txt 作为系统提示，不再加载 prompt_02.txt
 # ==================== 群白名单配置 ====================
 # 只有在这个列表中的群号才会启用 Bot 功能
 GROUP_WHITELIST = [
     # 694590185,  # 自己的群
     # 1032758463, # 悠游
-    152103400, #csqaq 网站交流群
+    #152103400, #csqaq 网站交流群
     #615988021, #fbw 9群
     # 添加更多群号...
 ]
@@ -68,10 +68,11 @@ ADD_WHITELIST_KEYWORDS = ["攻击他", "给我上", "加入白名单"]
 # ==================== 全局变量 ====================
 gpt_client = None
 llm_client = None
-conversation_history = {}  # 存储对话历史
+conversation_history = []  # 全局统一对话历史
 REPLY_ALL = False
 IGNORE_WHITELIST = False
 QUIET_MODE = False
+REPLY_PROBABILITY = 0.3 #0.3  # 回复概率30%
 
 
 def init_gpt_client():
@@ -89,15 +90,15 @@ def get_gpt_response(user_id, message):
     try:
         if not gpt_client:
             return "GPT 调用失败: GPT 客户端未初始化"
-        # 初始化用户对话历史
-        if user_id not in conversation_history:
-            conversation_history[user_id] = [
+        # 初始化全局对话历史
+        if not conversation_history:
+            conversation_history.append(
                 {"role": "system", "content": SYSTEM_PROMPT}
-            ]
-            print(f"✓ 已为用户 {user_id} 初始化对话历史")
+            )
+            print(f"✓ 已初始化全局对话历史")
         
         # 添加用户消息到历史
-        conversation_history[user_id].append({
+        conversation_history.append({
             "role": "user",
             "content": message
         })
@@ -105,14 +106,14 @@ def get_gpt_response(user_id, message):
         # 调用 GPT API
         params = {
             "model": GPT_MODEL,
-            "messages": conversation_history[user_id],
+            "messages": conversation_history,
             "temperature": 1.0,
             # 强制关闭流式输出，确保一次性返回完整文本
             "stream": False,
         }
         # 对于非 gpt-5 系列模型，设置 max_tokens 与 temperature
         if not GPT_MODEL.startswith("gpt-5"):
-            params.update({"max_completion_tokens": 500, })
+            params.update({"max_completion_tokens": 100, })
 
         response = gpt_client.chat.completions.create(**params)
         
@@ -120,14 +121,14 @@ def get_gpt_response(user_id, message):
         reply = response.choices[0].message.content
         
         # 保存助手回复到历史
-        conversation_history[user_id].append({
+        conversation_history.append({
             "role": "assistant",
             "content": reply
         })
         
-        # 只保留最近 10 条消息，防止历史过长
-        if len(conversation_history[user_id]) > 20:
-            conversation_history[user_id] = conversation_history[user_id][-20:]
+        # 只保留最近 20 条消息，防止历史过长
+        if len(conversation_history) > 21:  # system + 20条对话
+            conversation_history[:] = [conversation_history[0]] + conversation_history[-20:]
         
         return reply
     
@@ -153,15 +154,15 @@ def get_llm_response(user_id, message):
     try:
         if not llm_client:
             return "openrouter 调用失败: OpenRouter 客户端未初始化"
-        # 初始化用户对话历史
-        if user_id not in conversation_history:
-            conversation_history[user_id] = [
+        # 初始化全局对话历史
+        if not conversation_history:
+            conversation_history.append(
                 {"role": "system", "content": SYSTEM_PROMPT}
-            ]
-            print(f"✓ 已为用户 {user_id} 初始化对话历史")
+            )
+            print(f"✓ 已初始化全局对话历史")
         
         # 添加用户消息到历史
-        conversation_history[user_id].append({
+        conversation_history.append({
             "role": "user",
             "content": message
         })
@@ -171,7 +172,7 @@ def get_llm_response(user_id, message):
             model="xiaomi/mimo-v2-flash:free",
             #model="kwaipilot/kat-coder-pro:free",
             # model="nvidia/nemotron-nano-12b-v2-vl:free",
-            messages=conversation_history[user_id],
+            messages=conversation_history,
             max_tokens=2000,
             temperature=0.7,
             stream=False,
@@ -189,14 +190,14 @@ def get_llm_response(user_id, message):
         reply = re.sub(r'<think>.*?</think>', '', reply, flags=re.DOTALL).strip()
 
         # 保存助手回复到历史
-        conversation_history[user_id].append({
+        conversation_history.append({
             "role": "assistant",
             "content": reply
         })
         
-        # 只保留最近 10 条消息，防止历史过长
-        if len(conversation_history[user_id]) > 20:
-            conversation_history[user_id] = conversation_history[user_id][-20:]
+        # 只保留最近 20 条消息，防止历史过长
+        if len(conversation_history) > 21:  # system + 20条对话
+            conversation_history[:] = [conversation_history[0]] + conversation_history[-20:]
         
         return reply
     
@@ -306,12 +307,77 @@ def check_admin_command_add_whitelist(data):
     return False
 
 
+def extract_reply_info(message_data):
+    """提取回复信息（被回复的消息内容）
+    
+    返回: (被回复的消息内容, 被回复的用户ID) 或 (None, None)
+    """
+    if not isinstance(message_data, list):
+        return None, None
+    
+    for item in message_data:
+        if item.get("type") == "reply":
+            reply_data = item.get("data", {})
+            replied_text = reply_data.get("text", "")  # 被回复的消息内容
+            replied_user_id = reply_data.get("qq", "")  # 被回复的用户ID
+            return replied_text, replied_user_id
+    
+    return None, None
+
+
+def has_image(message_data):
+    """检测消息中是否包含图片"""
+    if not isinstance(message_data, list):
+        return False
+    
+    for item in message_data:
+        if item.get("type") == "image":
+            return True
+    return False
+
+
 def extract_text_from_message(raw_message):
     """从消息中提取纯文本内容（去掉 CQCode）"""
     import re
     # 移除所有 CQCode，如 [CQ:at,qq=xxxxx]、[CQ:image,file=xxx] 等
     text = re.sub(r'\[CQ:[^\]]+\]', '', raw_message)
     return text.strip()
+
+
+def build_message_with_context(raw_message, message_data, user_id, sender_info=None):
+    """构建包含回复上下文和用户信息的完整消息
+    
+    Args:
+        raw_message: 原始消息文本
+        message_data: 消息数据结构
+        user_id: 发送者QQ号
+        sender_info: 发送者信息字典（包含nickname等）
+    """
+    # 获取用户昵称，如果没有则使用QQ号
+    if sender_info and sender_info.get("nickname"):
+        user_name = sender_info.get("nickname")
+    elif sender_info and sender_info.get("card"):
+        user_name = sender_info.get("card")  # 群名片
+    else:
+        user_name = str(user_id)
+    
+    # 检测是否有图片
+    if has_image(message_data):
+        message_content = f"{user_name}发送了一张你看不了的图片"
+    else:
+        text_content = extract_text_from_message(raw_message)
+        if text_content:
+            message_content = f"{user_name}说：{text_content}"
+        else:
+            message_content = f"{user_name}发送了一条空消息"
+    
+    # 检查是否有回复内容
+    replied_text, replied_user_id = extract_reply_info(message_data)
+    if replied_text:
+        # 如果有回复内容，加入上下文
+        return f"[回复: {replied_text}] {message_content}"
+    else:
+        return message_content
 
 
 def is_group_whitelisted(group_id):
@@ -369,7 +435,7 @@ def check_admin_group_command(data):
     if is_mentioned:
         if "出来吧" in raw_message:
             return "add_group"
-        elif "退下吧" in raw_message:
+        elif "退下吧" in raw_message or "下去吧" in raw_message:
             return "remove_group"
     
     return None
@@ -388,6 +454,7 @@ def handle_message(data, responder):
             self_id = data.get("self_id")
             raw_message = data.get("raw_message", "")
             message_data = data.get("message", [])
+            sender_info = data.get("sender", {})  # 获取发送者信息
             
             # 🔍 调试：打印完整消息结构（静默模式下跳过）
             if not QUIET_MODE:
@@ -428,8 +495,15 @@ def handle_message(data, responder):
             should_reply = in_whitelist or REPLY_ALL
 
             if should_reply:
-                # 提取纯文本内容（去掉@标签）
-                text_content = extract_text_from_message(raw_message)
+                # 随机概率判断：30%概率回复
+                import random
+                if random.random() > REPLY_PROBABILITY:
+                    if not QUIET_MODE:
+                        print(f"   🎲 随机跳过回复（概率：{int(REPLY_PROBABILITY*100)}%）")
+                    return
+                
+                # 构建包含回复上下文的完整消息
+                text_content = build_message_with_context(raw_message, message_data, user_id, sender_info)
                 
                 if not QUIET_MODE:
                     print(f"   ✅ 用户在白名单中，调用 LLM...")
