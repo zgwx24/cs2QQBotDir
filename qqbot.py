@@ -41,15 +41,11 @@ SYSTEM_PROMPT = _safe_read_prompt("prompt_smart.txt")
 # 仅使用 prompt.txt 作为系统提示，不再加载 prompt_02.txt
 # ==================== 群白名单配置 ====================
 # 只有在这个列表中的群号才会启用 Bot 功能
-GROUP_WHITELIST = [
-    # 694590185,  # 自己的群
-    # 1032758463, # 悠游
-    #152103400, #csqaq 网站交流群
-    #615988021, #fbw 9群
-    # 添加更多群号...
-]
-# 设置为 None 或 [] 表示全部群都启用
-# GROUP_WHITELIST = None  # 或者 GROUP_WHITELIST = []
+# 设置为 "ALL" 表示全部群都启用，[] 表示不允许任何群
+# 管理员可以在群里说 "@机器人 出来吧" 来添加当前群到白名单
+# 管理员可以在群里说 "@机器人 退下吧" 来移除当前群的白名单
+GROUP_WHITELIST = []
+# GROUP_WHITELIST = "ALL"  # 取消注释此行以允许所有群
 
 # ==================== 用户白名单配置 ====================
 # 基于数字账号的群聊回复白名单
@@ -72,7 +68,7 @@ conversation_history = []  # 全局统一对话历史
 REPLY_ALL = False
 IGNORE_WHITELIST = False
 QUIET_MODE = False
-REPLY_PROBABILITY = 0.3 #0.3  # 回复概率30%
+REPLY_PROBABILITY = 1.0 #0.3  # 回复概率30%
 
 
 def init_gpt_client():
@@ -382,9 +378,13 @@ def build_message_with_context(raw_message, message_data, user_id, sender_info=N
 
 def is_group_whitelisted(group_id):
     """检查群号是否在白名单中"""
-    # 如果白名单为空或 None，允许所有群
-    if not GROUP_WHITELIST:
+    # 如果白名单为字符串 "ALL"，允许所有群
+    if GROUP_WHITELIST == "ALL":
         return True
+    
+    # 如果白名单为空、None 或不是列表，不允许任何群
+    if not GROUP_WHITELIST or not isinstance(GROUP_WHITELIST, list):
+        return False
     
     # 检查群号是否在白名单中
     return group_id in GROUP_WHITELIST
@@ -489,7 +489,7 @@ def handle_message(data, responder):
             # ✅ 检查用户是否在白名单中
             in_whitelist = is_user_in_whitelist(group_id, user_id)
             if not QUIET_MODE:
-                print(f"   白名单检查: {in_whitelist}")
+                print(f"   用户白名单检查: {in_whitelist}")
 
             # 若启用暴力模式（回复所有消息），则无需白名单
             should_reply = in_whitelist or REPLY_ALL
@@ -506,7 +506,10 @@ def handle_message(data, responder):
                 text_content = build_message_with_context(raw_message, message_data, user_id, sender_info)
                 
                 if not QUIET_MODE:
-                    print(f"   ✅ 用户在白名单中，调用 LLM...")
+                    if in_whitelist:
+                        print(f"   ✅ 用户在白名单中，调用 LLM...")
+                    elif REPLY_ALL:
+                        print(f"   ✅ REPLYALL 模式已启用，调用 LLM...")
                     print(f"   提取内容: {text_content}")
                 
                 reply = responder(f"group_{group_id}_{user_id}", text_content)
