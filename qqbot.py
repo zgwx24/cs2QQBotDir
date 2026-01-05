@@ -300,6 +300,7 @@ def check_admin_command_add_whitelist(data):
             target_user_id = int(target_user_id)
             if target_user_id != ADMIN_ACCOUNT:  # 不添加管理员自己
                 add_user_to_whitelist(group_id, target_user_id)
+        send_group_message(group_id, "收到")
         return True
     
     return False
@@ -323,6 +324,57 @@ def is_group_whitelisted(group_id):
     return group_id in GROUP_WHITELIST
 
 
+def add_group_to_whitelist(group_id):
+    """添加群号到白名单"""
+    if group_id not in GROUP_WHITELIST:
+        GROUP_WHITELIST.append(group_id)
+        print(f"✓ 已添加群 {group_id} 到群白名单")
+        return True
+    return False
+
+
+def remove_group_from_whitelist(group_id):
+    """从白名单移除群号，同时清空该群的用户白名单"""
+    if group_id in GROUP_WHITELIST:
+        GROUP_WHITELIST.remove(group_id)
+        print(f"✓ 已移除群 {group_id} 从群白名单")
+        
+        # 清空该群的用户白名单
+        if group_id in USER_WHITELIST:
+            del USER_WHITELIST[group_id]
+            print(f"✓ 已清空群 {group_id} 的用户白名单")
+        return True
+    return False
+
+
+def check_admin_group_command(data):
+    """检查管理员是否发出了群管理命令（添加/移除群白名单）
+    
+    返回: "add_group", "remove_group", 或 None
+    """
+    if ADMIN_ACCOUNT == 0:
+        return None
+    
+    user_id = data.get("user_id")
+    if user_id != ADMIN_ACCOUNT:
+        return None
+    
+    raw_message = data.get("raw_message", "")
+    self_id = data.get("self_id")
+    
+    # 检查是否 mention 了机器人
+    import re
+    is_mentioned = f"[CQ:at,qq={self_id}]" in raw_message
+    
+    if is_mentioned:
+        if "出来吧" in raw_message:
+            return "add_group"
+        elif "退下吧" in raw_message:
+            return "remove_group"
+    
+    return None
+
+
 def handle_message(data, responder):
     """处理接收到的消息"""
     # 只处理消息事件
@@ -343,6 +395,17 @@ def handle_message(data, responder):
                 print(f"   Raw: {raw_message}")
                 print(f"   Message 结构: {message_data}")
                 print(f"   Self ID: {self_id}")
+            
+            # ✅ 优先检查群管理命令（管理员 mention 机器人 + "出来吧"/"退下吧"）
+            group_command = check_admin_group_command(data)
+            if group_command == "add_group":
+                add_group_to_whitelist(group_id)
+                send_group_message(group_id, "来了")
+                return
+            elif group_command == "remove_group":
+                send_group_message(group_id, "886")
+                remove_group_from_whitelist(group_id)
+                return
             
             # ✅ 检查群号是否在白名单中（可选关闭）
             if not IGNORE_WHITELIST and not is_group_whitelisted(group_id):
