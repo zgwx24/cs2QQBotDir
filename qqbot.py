@@ -37,7 +37,7 @@ def _safe_read_prompt(filename: str) -> str:
     return ""
 
 
-SYSTEM_PROMPT = _safe_read_prompt("prompt.txt")
+SYSTEM_PROMPT = _safe_read_prompt("prompt_attack.txt")
 # 仅使用 prompt.txt 作为系统提示，不再加载 prompt_02.txt
 # ==================== 群白名单配置 ====================
 # 只有在这个列表中的群号才会启用 Bot 功能
@@ -55,7 +55,7 @@ GROUP_WHITELIST = [
 # 基于数字账号的群聊回复白名单
 # 只有在这个列表中的用户才会收到群聊回复
 USER_WHITELIST = {
-    # 152103400: [123456789, 987654321],  # 群号: [用户QQ号列表]
+     152103400: [2476957242],  # 群号: [用户QQ号列表]
 }
 
 # ==================== 管理员账号配置 ====================
@@ -168,7 +168,7 @@ def get_llm_response(user_id, message):
         
         # 调用 openrouter API
         response = llm_client.chat.completions.create(
-            model="tngtech/deepseek-r1t2-chimera:free",
+            model="xiaomi/mimo-v2-flash:free",
             #model="kwaipilot/kat-coder-pro:free",
             # model="nvidia/nemotron-nano-12b-v2-vl:free",
             messages=conversation_history[user_id],
@@ -180,6 +180,14 @@ def get_llm_response(user_id, message):
         # 获取回复
         reply = response.choices[0].message.content
         
+        # DEBUG: 打印原始回复以便调试
+        if not QUIET_MODE:
+            print(f"   [DEBUG] 原始回复: {repr(reply)}")
+
+        # 移除思考过程 <think>...</think>
+        import re
+        reply = re.sub(r'<think>.*?</think>', '', reply, flags=re.DOTALL).strip()
+
         # 保存助手回复到历史
         conversation_history[user_id].append({
             "role": "assistant",
@@ -369,8 +377,13 @@ def handle_message(data, responder):
                 if not QUIET_MODE:
                     print(f"   LLM 回复: {reply}")
                 
-                # 发送回复
-                send_group_message(group_id, reply)
+                # 检查是否调用失败，若失败则不发送群消息
+                if reply.startswith("openrouter 调用失败") or reply.startswith("GPT 调用失败"):
+                    if not QUIET_MODE:
+                        print(f"   ❌ API 调用失败，已拦截错误消息发送")
+                else:
+                    # 发送回复
+                    send_group_message(group_id, reply)
             else:
                 if not QUIET_MODE:
                     print(f"   ⏭️  用户不在白名单中，跳过处理")
