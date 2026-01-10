@@ -52,6 +52,12 @@ GROUP_WHITELIST = []
 # ==================== 管理员账号配置 ====================
 ADMIN_ACCOUNT = 635818639 # 请填写管理员QQ账号（数字）
 
+# ==================== Bot 昵称配置 ====================
+# 群内其他bot的昵称列表，遇到这些昵称的用户会：
+# 1. 消息格式改为"群内bot{昵称}：消息内容"
+# 2. 自动跳过回复（100%跳过），但保存到历史记录
+BOT_NICKNAMES = ["爱吃奶糖"]  # 可以根据需要添加更多bot昵称
+
 # ==================== 全局变量 ====================
 gpt_client = None
 llm_client = None
@@ -61,7 +67,7 @@ bot_nickname = None  # 缓存机器人昵称
 REPLY_ALL = False
 IGNORE_WHITELIST = False
 QUIET_MODE = False
-REPLY_PROBABILITY = 0.5 #0.3  # 回复概率30%
+REPLY_PROBABILITY = 0.3 #0.3  # 回复概率30%
 # 回复延迟配置（毫秒）：从环境变量读取，默认 10-100ms
 REPLY_DELAY_MIN = int(os.getenv("REPLY_DELAY_MIN", "10"))
 REPLY_DELAY_MAX = int(os.getenv("REPLY_DELAY_MAX", "100"))
@@ -227,6 +233,38 @@ def init_llm_client():
         api_key=LLM_API_KEY
         )
     print("✓ OpenRouter 客户端初始化成功")
+
+def add_message_to_history(session_id, message, self_id=None, group_id=None):
+    """只添加消息到对话历史，不调用 LLM API
+    
+    Args:
+        session_id: 会话标识符
+        message: 用户消息
+        self_id: 机器人的QQ号（可选，用于构建 system prompt）
+        group_id: 群号（可选）
+    """
+    # 获取或创建该会话的对话历史
+    if session_id not in conversation_histories:
+        # 构建包含机器人昵称的 system prompt
+        system_prompt = build_system_prompt(self_id, group_id)
+        conversation_histories[session_id] = [
+            {"role": "system", "content": system_prompt}
+        ]
+        if not QUIET_MODE:
+            print(f"✓ 已为会话 {session_id} 初始化对话历史（仅添加消息）")
+    
+    history = conversation_histories[session_id]
+    
+    # 添加用户消息到历史
+    history.append({
+        "role": "user",
+        "content": message
+    })
+    
+    # 只保留最近 20 条消息，防止历史过长
+    if len(history) > 21:  # system + 20条对话
+        history[:] = [history[0]] + history[-20:]
+
 
 def get_llm_response(session_id, message, self_id=None, group_id=None):
     """调用 openrouter API 获取回复
@@ -573,6 +611,42 @@ def extract_text_from_message(raw_message):
     return text.strip()
 
 
+def is_bot_user(sender_info, group_id=None, user_id=None):
+    """检测用户是否是bot（根据昵称匹配）
+    
+    Args:
+        sender_info: 发送者信息字典（包含nickname、card等）
+        group_id: 群号（可选，用于获取群昵称）
+        user_id: 用户QQ号（可选，用于获取完整信息）
+    
+    Returns:
+        tuple: (是否是bot, bot昵称) 或 (False, None)
+    """
+    if not BOT_NICKNAMES:
+        return False, None
+    
+    # 获取用户昵称（优先级：群昵称 > QQ昵称）
+    nickname = None
+    if sender_info:
+        nickname = sender_info.get("card") or sender_info.get("nickname")
+    
+    # 如果没有昵称且提供了 group_id 和 user_id，尝试通过 API 获取
+    if not nickname and group_id and user_id:
+        member_info = get_group_member_info_api(group_id, user_id)
+        if member_info:
+            nickname = member_info.get("card") or member_info.get("nickname")
+    
+    # 如果没有昵称，使用 user_id
+    if not nickname and user_id:
+        nickname = str(user_id)
+    
+    # 检查昵称是否在 BOT_NICKNAMES 列表中
+    if nickname and nickname in BOT_NICKNAMES:
+        return True, nickname
+    
+    return False, None
+
+
 def build_message_with_context(raw_message, message_data, user_id, sender_info=None, group_id=None):
     """构建包含回复上下文和用户信息的完整消息
     
@@ -582,7 +656,13 @@ def build_message_with_context(raw_message, message_data, user_id, sender_info=N
         user_id: 发送者QQ号
         sender_info: 发送者信息字典（包含nickname等）
         group_id: 群号（可选，用于获取 mention 用户的群昵称）
+    
+    Returns:
+        tuple: (构建后的消息内容, 是否是bot, bot昵称) 或 (消息内容, False, None)
     """
+    # 检测是否是bot
+    is_bot, bot_nickname = is_bot_user(sender_info, group_id, user_id)
+    
     # 获取用户昵称，如果没有则使用QQ号
     if sender_info and sender_info.get("nickname"):
         user_name = sender_info.get("nickname")
@@ -591,24 +671,40 @@ def build_message_with_context(raw_message, message_data, user_id, sender_info=N
     else:
         user_name = str(user_id)
     
-    # 检测是否有图片
-    if has_image(message_data):
-        message_content = f"{user_name}发送了一张你看不了的图片"
-    else:
-        # 使用新函数提取文本，保留 mention 信息（优先使用群昵称，然后是昵称，最后是QQ号）
-        text_content = extract_text_with_mentions(raw_message, message_data, group_id)
-        if text_content:
-            message_content = f"{user_name}说：{text_content}"
+    # 如果是bot，使用特殊格式
+    if is_bot:
+        # 检测是否有图片
+        if has_image(message_data):
+            message_content = f"群内bot{bot_nickname}：发送了一张你看不了的图片"
         else:
-            message_content = f"{user_name}发送了一条空消息"
+            # 使用新函数提取文本，保留 mention 信息
+            text_content = extract_text_with_mentions(raw_message, message_data, group_id)
+            if text_content:
+                message_content = f"群内bot{bot_nickname}：{text_content}"
+            else:
+                message_content = f"群内bot{bot_nickname}：发送了一条空消息"
+    else:
+        # 普通用户，使用原有格式
+        # 检测是否有图片
+        if has_image(message_data):
+            message_content = f"{user_name}发送了一张你看不了的图片"
+        else:
+            # 使用新函数提取文本，保留 mention 信息（优先使用群昵称，然后是昵称，最后是QQ号）
+            text_content = extract_text_with_mentions(raw_message, message_data, group_id)
+            if text_content:
+                message_content = f"{user_name}说：{text_content}"
+            else:
+                message_content = f"{user_name}发送了一条空消息"
     
     # 检查是否有回复内容
     replied_text, replied_user_id = extract_reply_info(message_data)
     if replied_text:
         # 如果有回复内容，加入上下文
-        return f"[回复: {replied_text}] {message_content}"
+        final_message = f"[回复: {replied_text}] {message_content}"
     else:
-        return message_content
+        final_message = message_content
+    
+    return final_message, is_bot, bot_nickname
 
 
 def is_group_whitelisted(group_id):
@@ -755,14 +851,28 @@ def handle_message(data, responder):
                     print(f"   ❌ 群号不在白名单中且未启用 REPLY_ALL，跳过处理")
                 return
 
-            # 随机概率判断
+            # 构建包含回复上下文的完整消息（传递 group_id 以便获取群昵称）
+            text_content, is_bot, bot_nickname = build_message_with_context(raw_message, message_data, user_id, sender_info, group_id)
+            
+            # 检查是否是bot用户
+            if is_bot:
+                # Bot 用户：保存到历史记录但不回复（100%跳过，不经过随机概率判断）
+                if not QUIET_MODE:
+                    print(f"   🤖 检测到bot用户：{bot_nickname}，保存到历史但不回复")
+                # 检查消息中是否包含"大盘"关键词
+                extracted_text = extract_text_from_message(raw_message)
+                if "大盘" in extracted_text:
+                    market_info = fetch_market_index()
+                    text_content = f"{text_content}\n{market_info}"
+                # 添加消息到历史记录但不调用 LLM
+                add_message_to_history(group_id, text_content, self_id=self_id, group_id=group_id)
+                return
+            
+            # 随机概率判断（普通用户才进行随机判断）
             if random.random() > REPLY_PROBABILITY:
                 if not QUIET_MODE:
                     print(f"   🎲 随机跳过回复（概率：{int(REPLY_PROBABILITY*100)}%）")
                 return
-            
-            # 构建包含回复上下文的完整消息（传递 group_id 以便获取群昵称）
-            text_content = build_message_with_context(raw_message, message_data, user_id, sender_info, group_id)
             
             # 检查消息中是否包含"大盘"关键词
             extracted_text = extract_text_from_message(raw_message)
