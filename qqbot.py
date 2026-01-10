@@ -56,6 +56,7 @@ ADMIN_ACCOUNT = 635818639 # 请填写管理员QQ账号（数字）
 gpt_client = None
 llm_client = None
 conversation_histories = {}  # 按会话ID区分的对话历史 {session_id: [history]}
+member_cache = {}  # 缓存群成员信息 {group_id: {user_id: {card, nickname}}}
 REPLY_ALL = False
 IGNORE_WHITELIST = False
 QUIET_MODE = False
@@ -364,15 +365,131 @@ def has_image(message_data):
     return False
 
 
+def get_group_member_info_api(group_id, user_id):
+    """通过 API 获取群成员信息（包括群昵称和昵称）
+    
+    Args:
+        group_id: 群号
+        user_id: 用户QQ号
+    
+    Returns:
+        dict: {card: 群昵称, nickname: 昵称, ...} 或 None
+    """
+    # 先从缓存中查找
+    if group_id in member_cache and user_id in member_cache[group_id]:
+        return member_cache[group_id][user_id]
+    
+    try:
+        url = f"{API_URL}/get_group_member_info"
+        headers = {
+            "Authorization": f"Bearer {API_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "group_id": group_id,
+            "user_id": user_id,
+            "no_cache": False  # 使用缓存
+        }
+        response = requests.post(url, json=data, headers=headers, timeout=5)
+        if response.status_code == 200:
+            result = response.json()
+            # NapCat API 可能返回 status="ok" 或 retcode=0
+            if result.get("status") == "ok" or result.get("retcode") == 0:
+                member_info = result.get("data", {})
+                # 缓存结果
+                if group_id not in member_cache:
+                    member_cache[group_id] = {}
+                member_cache[group_id][user_id] = member_info
+                return member_info
+    except Exception as e:
+        if not QUIET_MODE:
+            print(f"   [WARN] 获取群成员信息失败 (群{group_id}, 用户{user_id}): {e}")
+    return None
+
+
+def extract_text_with_mentions(raw_message, message_data=None, group_id=None):
+    """从消息中提取文本内容，保留 mention 信息（转换为 @用户名 格式）
+    
+    Args:
+        raw_message: 原始消息文本，包含 CQCode
+        message_data: 消息数据数组，用于获取 mention 用户的完整信息
+        group_id: 群号（用于通过 API 获取群昵称）
+    
+    Returns:
+        str: 提取的文本，mention 转换为 @群昵称 或 @昵称 或 @QQ号
+    """
+    import re
+    
+    # 从 message_data 中构建 mention 用户信息映射 {qq: display_name}
+    mention_map = {}
+    if isinstance(message_data, list):
+        for item in message_data:
+            if item.get("type") == "at":
+                at_data = item.get("data", {})
+                at_qq = str(at_data.get("qq", ""))
+                if not at_qq:
+                    continue
+                
+                display_name = None
+                
+                # 优先使用 message_data 中的 card（群昵称）
+                display_name = at_data.get("card")
+                
+                # 如果没有 card，尝试使用 name（昵称）
+                if not display_name:
+                    display_name = at_data.get("name")
+                
+                # 如果 message_data 中都没有，且提供了 group_id，通过 API 获取
+                if not display_name and group_id:
+                    member_info = get_group_member_info_api(group_id, int(at_qq))
+                    if member_info:
+                        # 优先级：群昵称（card） > 昵称（nickname）
+                        display_name = member_info.get("card") or member_info.get("nickname")
+                
+                # 如果还是没有，使用 QQ 号
+                if not display_name:
+                    display_name = at_qq
+                
+                mention_map[at_qq] = display_name
+    
+    # 替换 mention 的 CQCode
+    def replace_mention(match):
+        cq_code = match.group(0)
+        qq_match = re.search(r'qq=(\d+)', cq_code)
+        if qq_match:
+            qq = qq_match.group(1)
+            # 优先从 mention_map 中获取（群昵称/昵称）
+            if qq in mention_map:
+                return f"@{mention_map[qq]}"
+            # 其次从 CQCode 中提取 name
+            name_match = re.search(r'name=([^,\]]+)', cq_code)
+            if name_match:
+                return f"@{name_match.group(1)}"
+            # 最后使用 QQ 号
+            return f"@{qq}"
+        return cq_code
+    
+    # 替换 mention 的 CQCode
+    text = re.sub(r'\[CQ:at[^\]]+\]', replace_mention, raw_message)
+    
+    # 移除其他 CQCode（如图片、表情等），但保留 mention
+    text = re.sub(r'\[CQ:(?!at)[^\]]+\]', '', text)
+    
+    return text.strip()
+
+
 def extract_text_from_message(raw_message):
-    """从消息中提取纯文本内容（去掉 CQCode）"""
+    """从消息中提取纯文本内容（去掉 CQCode）
+    
+    注意：此函数会移除所有 mention，如需保留 mention，请使用 extract_text_with_mentions
+    """
     import re
     # 移除所有 CQCode，如 [CQ:at,qq=xxxxx]、[CQ:image,file=xxx] 等
     text = re.sub(r'\[CQ:[^\]]+\]', '', raw_message)
     return text.strip()
 
 
-def build_message_with_context(raw_message, message_data, user_id, sender_info=None):
+def build_message_with_context(raw_message, message_data, user_id, sender_info=None, group_id=None):
     """构建包含回复上下文和用户信息的完整消息
     
     Args:
@@ -380,6 +497,7 @@ def build_message_with_context(raw_message, message_data, user_id, sender_info=N
         message_data: 消息数据结构
         user_id: 发送者QQ号
         sender_info: 发送者信息字典（包含nickname等）
+        group_id: 群号（可选，用于获取 mention 用户的群昵称）
     """
     # 获取用户昵称，如果没有则使用QQ号
     if sender_info and sender_info.get("nickname"):
@@ -393,7 +511,8 @@ def build_message_with_context(raw_message, message_data, user_id, sender_info=N
     if has_image(message_data):
         message_content = f"{user_name}发送了一张你看不了的图片"
     else:
-        text_content = extract_text_from_message(raw_message)
+        # 使用新函数提取文本，保留 mention 信息（优先使用群昵称，然后是昵称，最后是QQ号）
+        text_content = extract_text_with_mentions(raw_message, message_data, group_id)
         if text_content:
             message_content = f"{user_name}说：{text_content}"
         else:
@@ -445,6 +564,32 @@ def remove_group_from_whitelist(group_id):
     return False
 
 
+def is_mentioned_bot(message_data, self_id):
+    """检查消息中是否 mention 了机器人
+    
+    Args:
+        message_data: 消息数据数组
+        self_id: 机器人的QQ号
+    
+    Returns:
+        bool: 是否 mention 了机器人
+    """
+    if not self_id:
+        return False
+    
+    # 从 message_data 数组中检查（优先）
+    if isinstance(message_data, list):
+        for item in message_data:
+            if item.get("type") == "at":
+                at_data = item.get("data", {})
+                at_qq = str(at_data.get("qq", ""))
+                # self_id 可能是字符串或整数，需要转换比较
+                if str(at_qq) == str(self_id):
+                    return True
+    
+    return False
+
+
 def check_admin_group_command(data):
     """检查管理员是否发出了群管理命令（添加/移除群白名单）
     
@@ -459,16 +604,28 @@ def check_admin_group_command(data):
     
     raw_message = data.get("raw_message", "")
     self_id = data.get("self_id")
+    message_data = data.get("message", [])
     
-    # 检查是否 mention 了机器人
-    import re
-    is_mentioned = f"[CQ:at,qq={self_id}]" in raw_message
+    # 检查是否 mention 了机器人（优先从 message_data 检查）
+    is_mentioned = is_mentioned_bot(message_data, self_id)
     
-    if is_mentioned:
-        if "出来吧" in raw_message:
-            return "add_group"
-        elif "退下吧" in raw_message or "下去吧" in raw_message:
-            return "remove_group"
+    # 如果 message_data 中没有找到，尝试从 raw_message 中检查（兼容性）
+    if not is_mentioned and raw_message and self_id:
+        import re
+        # 使用正则表达式匹配，支持可能的额外参数
+        mention_pattern = rf'\[CQ:at,qq={re.escape(str(self_id))}(?:,.*?)?\]'
+        is_mentioned = bool(re.search(mention_pattern, raw_message))
+    
+    if not is_mentioned:
+        return None
+    
+    # 提取纯文本内容进行关键词检查
+    text_content = extract_text_from_message(raw_message)
+    
+    if "出来吧" in text_content:
+        return "add_group"
+    elif "退下吧" in text_content or "下去吧" in text_content:
+        return "remove_group"
     
     return None
 
@@ -520,8 +677,8 @@ def handle_message(data, responder):
                     print(f"   🎲 随机跳过回复（概率：{int(REPLY_PROBABILITY*100)}%）")
                 return
             
-            # 构建包含回复上下文的完整消息
-            text_content = build_message_with_context(raw_message, message_data, user_id, sender_info)
+            # 构建包含回复上下文的完整消息（传递 group_id 以便获取群昵称）
+            text_content = build_message_with_context(raw_message, message_data, user_id, sender_info, group_id)
             
             # 检查消息中是否包含"大盘"关键词
             extracted_text = extract_text_from_message(raw_message)
