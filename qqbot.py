@@ -57,6 +57,7 @@ gpt_client = None
 llm_client = None
 conversation_histories = {}  # 按会话ID区分的对话历史 {session_id: [history]}
 member_cache = {}  # 缓存群成员信息 {group_id: {user_id: {card, nickname}}}
+bot_nickname = None  # 缓存机器人昵称
 REPLY_ALL = False
 IGNORE_WHITELIST = False
 QUIET_MODE = False
@@ -64,6 +65,81 @@ REPLY_PROBABILITY = 0.5 #0.3  # 回复概率30%
 # 回复延迟配置（毫秒）：从环境变量读取，默认 10-100ms
 REPLY_DELAY_MIN = int(os.getenv("REPLY_DELAY_MIN", "10"))
 REPLY_DELAY_MAX = int(os.getenv("REPLY_DELAY_MAX", "100"))
+
+
+def get_bot_nickname(self_id=None):
+    """获取机器人昵称
+    
+    Args:
+        self_id: 机器人的QQ号（可选，用于验证）
+    
+    Returns:
+        str: 机器人昵称，如果获取失败返回 None
+    """
+    global bot_nickname
+    
+    # 如果已经缓存，直接返回
+    if bot_nickname:
+        return bot_nickname
+    
+    try:
+        url = f"{API_URL}/get_login_info"
+        headers = {
+            "Authorization": f"Bearer {API_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        response = requests.post(url, json={}, headers=headers, timeout=5)
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("status") == "ok" or result.get("retcode") == 0:
+                data = result.get("data", {})
+                nickname = data.get("nickname") or data.get("user_name")
+                if nickname:
+                    bot_nickname = nickname
+                    if not QUIET_MODE:
+                        print(f"✓ 获取到机器人昵称: {nickname}")
+                    return nickname
+    except Exception as e:
+        if not QUIET_MODE:
+            print(f"✗ 获取机器人昵称失败: {e}")
+    
+    return None
+
+
+def build_system_prompt(self_id=None, group_id=None):
+    """构建系统提示词，包含机器人昵称信息
+    
+    Args:
+        self_id: 机器人的QQ号（可选）
+        group_id: 群号（可选，用于获取群昵称）
+    
+    Returns:
+        str: 完整的系统提示词
+    """
+    prompt = SYSTEM_PROMPT
+    
+    nickname = None
+    
+    # 如果有群号，先尝试获取机器人在该群的昵称（群昵称优先）
+    if group_id and self_id:
+        member_info = get_group_member_info_api(group_id, int(self_id))
+        if member_info:
+            # 优先使用群昵称（card）
+            nickname = member_info.get("card")
+    
+    # 如果没有群昵称，获取QQ昵称（一般群都是自己设置昵称，所以基本上就是QQ昵称）
+    if not nickname:
+        nickname = get_bot_nickname(self_id)
+    
+    # 如果还是没有获取到昵称，使用 self_id
+    if not nickname and self_id:
+        nickname = str(self_id)
+    
+    # 如果有昵称，添加到 system prompt
+    if nickname:
+        prompt = f"{prompt}\n\n你现在的昵称是：{nickname}"
+    
+    return prompt
 
 
 def init_gpt_client():
@@ -76,12 +152,14 @@ def init_gpt_client():
     print("✓ GPT 客户端初始化成功")
 
 
-def get_gpt_response(session_id, message):
+def get_gpt_response(session_id, message, self_id=None, group_id=None):
     """调用 GPT API 获取回复
     
     Args:
         session_id: 会话标识符（群ID或 private_用户ID）
         message: 用户消息
+        self_id: 机器人的QQ号（可选，用于构建 system prompt）
+        group_id: 群号（可选，用于获取群昵称）
     """
     try:
         if not gpt_client:
@@ -89,8 +167,10 @@ def get_gpt_response(session_id, message):
         
         # 获取或创建该会话的对话历史
         if session_id not in conversation_histories:
+            # 构建包含机器人昵称的 system prompt
+            system_prompt = build_system_prompt(self_id, group_id)
             conversation_histories[session_id] = [
-                {"role": "system", "content": SYSTEM_PROMPT}
+                {"role": "system", "content": system_prompt}
             ]
             if not QUIET_MODE:
                 print(f"✓ 已为会话 {session_id} 初始化对话历史")
@@ -148,12 +228,14 @@ def init_llm_client():
         )
     print("✓ OpenRouter 客户端初始化成功")
 
-def get_llm_response(session_id, message):
+def get_llm_response(session_id, message, self_id=None, group_id=None):
     """调用 openrouter API 获取回复
     
     Args:
         session_id: 会话标识符（群ID或 private_用户ID）
         message: 用户消息
+        self_id: 机器人的QQ号（可选，用于构建 system prompt）
+        group_id: 群号（可选，用于获取群昵称）
     """
     try:
         if not llm_client:
@@ -161,8 +243,10 @@ def get_llm_response(session_id, message):
         
         # 获取或创建该会话的对话历史
         if session_id not in conversation_histories:
+            # 构建包含机器人昵称的 system prompt
+            system_prompt = build_system_prompt(self_id, group_id)
             conversation_histories[session_id] = [
-                {"role": "system", "content": SYSTEM_PROMPT}
+                {"role": "system", "content": system_prompt}
             ]
             if not QUIET_MODE:
                 print(f"✓ 已为会话 {session_id} 初始化对话历史")
@@ -263,7 +347,7 @@ def fetch_market_index():
                 else:
                     diff_str = str(rise_fall_diff)
                 
-                return f"你查了一下现在大盘是：{index}点，涨跌幅：{rate_str}，涨跌值：{diff_str}"
+                return f"你查了一下现在大盘是：{index}点，今日涨跌幅：{rate_str}，今日涨跌值：{diff_str}"
             else:
                 error_msg = result.get("errorMsg", "查询失败")
                 return f"你查了一下大盘，但是查询失败了：{error_msg}"
@@ -696,7 +780,8 @@ def handle_message(data, responder):
                 print(f"   提取内容: {text_content}")
             
             # 使用群ID作为会话ID，这样同一个群的所有用户共享对话历史
-            reply = responder(group_id, text_content)
+            # 传递 self_id 和 group_id 以便在 system prompt 中加入机器人昵称
+            reply = responder(group_id, text_content, self_id=self_id, group_id=group_id)
             
             if not QUIET_MODE:
                 print(f"   LLM 回复: {reply}")
@@ -713,6 +798,7 @@ def handle_message(data, responder):
             # 私聊消息处理（私聊总是回复，不需要@）
             user_id = data.get("user_id")
             raw_message = data.get("raw_message", "")
+            self_id = data.get("self_id")  # 私聊也有 self_id
             
             if not QUIET_MODE:
                 print(f"💬 私信 来自用户 {user_id}:")
@@ -733,7 +819,8 @@ def handle_message(data, responder):
                 print(f"   调用 LLM...")
             
             # 调用 LLM 获取回复
-            reply = responder(f"private_{user_id}", text_content)
+            # 对于私聊，group_id 为 None，只传递 self_id（用于获取QQ昵称）
+            reply = responder(f"private_{user_id}", text_content, self_id=self_id, group_id=None)
             
             if not QUIET_MODE:
                 print(f"   LLM 回复: {reply}")
