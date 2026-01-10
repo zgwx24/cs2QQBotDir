@@ -59,7 +59,7 @@ conversation_histories = {}  # 按会话ID区分的对话历史 {session_id: [hi
 REPLY_ALL = False
 IGNORE_WHITELIST = False
 QUIET_MODE = False
-REPLY_PROBABILITY = 1.0 #0.3  # 回复概率30%
+REPLY_PROBABILITY = 0.5 #0.3  # 回复概率30%
 # 回复延迟配置（毫秒）：从环境变量读取，默认 10-100ms
 REPLY_DELAY_MIN = int(os.getenv("REPLY_DELAY_MIN", "10"))
 REPLY_DELAY_MAX = int(os.getenv("REPLY_DELAY_MAX", "100"))
@@ -214,6 +214,64 @@ def get_llm_response(session_id, message):
 
 
 
+
+
+def fetch_market_index():
+    """查询 SteamDT 大盘指数（同步版本）
+    
+    Returns:
+        str: 格式化的大盘信息，如果查询失败返回错误信息
+    """
+    url = "https://api.steamdt.com/user/item/block/v1/summary"
+    current_ts = str(int(time.time() * 1000))
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://www.steamdt.com/",
+        "Content-Type": "application/json"
+    }
+    
+    params = {"timestamp": current_ts}
+    payload = {
+        "type": "BROAD",
+        "level": 0,
+        "platform": "ALL",
+        "typeVal": "",
+        "timestamp": current_ts
+    }
+    
+    try:
+        response = requests.post(url, params=params, json=payload, headers=headers, timeout=10)
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("success") and result.get("data"):
+                data = result["data"]
+                index = data.get("index", "N/A")
+                name = data.get("name", "大盘")
+                rise_fall_rate = data.get("riseFallRate", "0")
+                rise_fall_diff = data.get("riseFallDiff", "0")
+                
+                # 格式化信息
+                if isinstance(rise_fall_rate, (int, float)):
+                    rate_str = f"{rise_fall_rate:+.2f}%"
+                else:
+                    rate_str = str(rise_fall_rate)
+                
+                if isinstance(rise_fall_diff, (int, float)):
+                    diff_str = f"{rise_fall_diff:+.2f}"
+                else:
+                    diff_str = str(rise_fall_diff)
+                
+                return f"你查了一下现在大盘是：{index}点，涨跌幅：{rate_str}，涨跌值：{diff_str}"
+            else:
+                error_msg = result.get("errorMsg", "查询失败")
+                return f"你查了一下大盘，但是查询失败了：{error_msg}"
+        else:
+            return f"你查了一下大盘，但是接口返回错误：HTTP {response.status_code}"
+    except requests.exceptions.Timeout:
+        return "你查了一下大盘，但是查询超时了"
+    except Exception as e:
+        return f"你查了一下大盘，但是发生了错误：{str(e)}"
 
 
 def apply_reply_delay():
@@ -465,6 +523,17 @@ def handle_message(data, responder):
             # 构建包含回复上下文的完整消息
             text_content = build_message_with_context(raw_message, message_data, user_id, sender_info)
             
+            # 检查消息中是否包含"大盘"关键词
+            extracted_text = extract_text_from_message(raw_message)
+            if "大盘" in extracted_text:
+                if not QUIET_MODE:
+                    print(f"   🔍 检测到'大盘'关键词，正在查询大盘信息...")
+                market_info = fetch_market_index()
+                # 将查询结果添加到消息中
+                text_content = f"{text_content}\n{market_info}"
+                if not QUIET_MODE:
+                    print(f"   📊 大盘信息: {market_info}")
+            
             if not QUIET_MODE:
                 print(f"   ✅ 调用 LLM...")
                 print(f"   提取内容: {text_content}")
@@ -491,10 +560,23 @@ def handle_message(data, responder):
             if not QUIET_MODE:
                 print(f"💬 私信 来自用户 {user_id}:")
                 print(f"   内容: {raw_message}")
+            
+            # 检查消息中是否包含"大盘"关键词
+            text_content = raw_message
+            if "大盘" in raw_message:
+                if not QUIET_MODE:
+                    print(f"   🔍 检测到'大盘'关键词，正在查询大盘信息...")
+                market_info = fetch_market_index()
+                # 将查询结果添加到消息中
+                text_content = f"{raw_message}\n{market_info}"
+                if not QUIET_MODE:
+                    print(f"   📊 大盘信息: {market_info}")
+            
+            if not QUIET_MODE:
                 print(f"   调用 LLM...")
             
             # 调用 LLM 获取回复
-            reply = responder(f"private_{user_id}", raw_message)
+            reply = responder(f"private_{user_id}", text_content)
             
             if not QUIET_MODE:
                 print(f"   LLM 回复: {reply}")
