@@ -8,6 +8,8 @@ import os
 from dotenv import load_dotenv
 from pathlib import Path
 import logging
+import time
+import random
 
 # Configure logging so `mcp_comm` debug/info logs appear on the terminal.
 # Default to INFO to avoid excessive noise; set to DEBUG to see all debug messages.
@@ -47,28 +49,20 @@ SYSTEM_PROMPT = _safe_read_prompt("prompt_smart.txt")
 GROUP_WHITELIST = []
 # GROUP_WHITELIST = "ALL"  # 取消注释此行以允许所有群
 
-# ==================== 用户白名单配置 ====================
-# 基于数字账号的群聊回复白名单
-# 只有在这个列表中的用户才会收到群聊回复
-USER_WHITELIST = {
-     152103400: [2476957242],  # 群号: [用户QQ号列表]
-}
-
 # ==================== 管理员账号配置 ====================
-# 管理员可以通过 mention 用户并说"攻击他"、"给我上"等关键词来添加白名单
 ADMIN_ACCOUNT = 635818639 # 请填写管理员QQ账号（数字）
-
-# 触发添加白名单的关键词
-ADD_WHITELIST_KEYWORDS = ["攻击他", "给我上", "加入白名单"]
 
 # ==================== 全局变量 ====================
 gpt_client = None
 llm_client = None
-conversation_history = []  # 全局统一对话历史
+conversation_histories = {}  # 按会话ID区分的对话历史 {session_id: [history]}
 REPLY_ALL = False
 IGNORE_WHITELIST = False
 QUIET_MODE = False
 REPLY_PROBABILITY = 1.0 #0.3  # 回复概率30%
+# 回复延迟配置（毫秒）：从环境变量读取，默认 10-100ms
+REPLY_DELAY_MIN = int(os.getenv("REPLY_DELAY_MIN", "10"))
+REPLY_DELAY_MAX = int(os.getenv("REPLY_DELAY_MAX", "100"))
 
 
 def init_gpt_client():
@@ -81,20 +75,29 @@ def init_gpt_client():
     print("✓ GPT 客户端初始化成功")
 
 
-def get_gpt_response(user_id, message):
-    """调用 GPT API 获取回复"""
+def get_gpt_response(session_id, message):
+    """调用 GPT API 获取回复
+    
+    Args:
+        session_id: 会话标识符（群ID或 private_用户ID）
+        message: 用户消息
+    """
     try:
         if not gpt_client:
             return "GPT 调用失败: GPT 客户端未初始化"
-        # 初始化全局对话历史
-        if not conversation_history:
-            conversation_history.append(
+        
+        # 获取或创建该会话的对话历史
+        if session_id not in conversation_histories:
+            conversation_histories[session_id] = [
                 {"role": "system", "content": SYSTEM_PROMPT}
-            )
-            print(f"✓ 已初始化全局对话历史")
+            ]
+            if not QUIET_MODE:
+                print(f"✓ 已为会话 {session_id} 初始化对话历史")
+        
+        history = conversation_histories[session_id]
         
         # 添加用户消息到历史
-        conversation_history.append({
+        history.append({
             "role": "user",
             "content": message
         })
@@ -102,9 +105,8 @@ def get_gpt_response(user_id, message):
         # 调用 GPT API
         params = {
             "model": GPT_MODEL,
-            "messages": conversation_history,
+            "messages": history,
             "temperature": 1.0,
-            # 强制关闭流式输出，确保一次性返回完整文本
             "stream": False,
         }
         # 对于非 gpt-5 系列模型，设置 max_tokens 与 temperature
@@ -117,14 +119,14 @@ def get_gpt_response(user_id, message):
         reply = response.choices[0].message.content
         
         # 保存助手回复到历史
-        conversation_history.append({
+        history.append({
             "role": "assistant",
             "content": reply
         })
         
         # 只保留最近 20 条消息，防止历史过长
-        if len(conversation_history) > 21:  # system + 20条对话
-            conversation_history[:] = [conversation_history[0]] + conversation_history[-20:]
+        if len(history) > 21:  # system + 20条对话
+            history[:] = [history[0]] + history[-20:]
         
         return reply
     
@@ -145,20 +147,29 @@ def init_llm_client():
         )
     print("✓ OpenRouter 客户端初始化成功")
 
-def get_llm_response(user_id, message):
-    """调用 openrouter API 获取回复"""
+def get_llm_response(session_id, message):
+    """调用 openrouter API 获取回复
+    
+    Args:
+        session_id: 会话标识符（群ID或 private_用户ID）
+        message: 用户消息
+    """
     try:
         if not llm_client:
             return "openrouter 调用失败: OpenRouter 客户端未初始化"
-        # 初始化全局对话历史
-        if not conversation_history:
-            conversation_history.append(
+        
+        # 获取或创建该会话的对话历史
+        if session_id not in conversation_histories:
+            conversation_histories[session_id] = [
                 {"role": "system", "content": SYSTEM_PROMPT}
-            )
-            print(f"✓ 已初始化全局对话历史")
+            ]
+            if not QUIET_MODE:
+                print(f"✓ 已为会话 {session_id} 初始化对话历史")
+        
+        history = conversation_histories[session_id]
         
         # 添加用户消息到历史
-        conversation_history.append({
+        history.append({
             "role": "user",
             "content": message
         })
@@ -168,7 +179,7 @@ def get_llm_response(user_id, message):
             model="xiaomi/mimo-v2-flash:free",
             #model="kwaipilot/kat-coder-pro:free",
             # model="nvidia/nemotron-nano-12b-v2-vl:free",
-            messages=conversation_history,
+            messages=history,
             max_tokens=2000,
             temperature=0.7,
             stream=False,
@@ -186,14 +197,14 @@ def get_llm_response(user_id, message):
         reply = re.sub(r'<think>.*?</think>', '', reply, flags=re.DOTALL).strip()
 
         # 保存助手回复到历史
-        conversation_history.append({
+        history.append({
             "role": "assistant",
             "content": reply
         })
         
         # 只保留最近 20 条消息，防止历史过长
-        if len(conversation_history) > 21:  # system + 20条对话
-            conversation_history[:] = [conversation_history[0]] + conversation_history[-20:]
+        if len(history) > 21:  # system + 20条对话
+            history[:] = [history[0]] + history[-20:]
         
         return reply
     
@@ -205,9 +216,23 @@ def get_llm_response(user_id, message):
 
 
 
+def apply_reply_delay():
+    """应用随机回复延迟"""
+    if REPLY_DELAY_MIN >= 0 and REPLY_DELAY_MAX >= REPLY_DELAY_MIN:
+        delay_ms = random.randint(REPLY_DELAY_MIN, REPLY_DELAY_MAX)
+        delay_seconds = delay_ms / 1000.0  # 转换为秒
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
+            if not QUIET_MODE:
+                print(f"   ⏱️  延迟 {delay_ms}ms 后发送")
+
+
 def send_group_message(group_id, message):
     """发送群组消息"""
     try:
+        # 应用随机延迟
+        apply_reply_delay()
+        
         url = f"{API_URL}/send_group_msg"
         headers = {
             "Authorization": f"Bearer {API_TOKEN}",
@@ -230,6 +255,9 @@ def send_group_message(group_id, message):
 def send_private_message(user_id, message):
     """发送私聊消息"""
     try:
+        # 应用随机延迟
+        apply_reply_delay()
+        
         url = f"{API_URL}/send_private_msg"
         headers = {
             "Authorization": f"Bearer {API_TOKEN}",
@@ -247,60 +275,6 @@ def send_private_message(user_id, message):
     except Exception as e:
         print(f"✗ 发送私信失败: {str(e)}")
         return None
-
-
-def is_user_in_whitelist(group_id, user_id):
-    """检查用户是否在群的白名单中"""
-    if group_id not in USER_WHITELIST:
-        return False
-    return user_id in USER_WHITELIST[group_id]
-
-
-def add_user_to_whitelist(group_id, user_id):
-    """添加用户到群的白名单"""
-    if group_id not in USER_WHITELIST:
-        USER_WHITELIST[group_id] = []
-    if user_id not in USER_WHITELIST[group_id]:
-        USER_WHITELIST[group_id].append(user_id)
-        print(f"✓ 已添加用户 {user_id} 到群 {group_id} 的白名单")
-        return True
-    return False
-
-
-def check_admin_command_add_whitelist(data):
-    """检查管理员是否发出了添加白名单的命令
-    
-    命令格式: 管理员 mention 用户并说出关键词如"攻击他"、"给我上"等
-    """
-    if ADMIN_ACCOUNT == 0:
-        return False  # 管理员账号未配置
-    
-    user_id = data.get("user_id")
-    if user_id != ADMIN_ACCOUNT:
-        return False  # 不是管理员
-    
-    raw_message = data.get("raw_message", "")
-    
-    # 检查是否包含关键词
-    has_keyword = any(keyword in raw_message for keyword in ADD_WHITELIST_KEYWORDS)
-    if not has_keyword:
-        return False
-    
-    # 检查是否 mention 了用户
-    import re
-    matches = re.findall(r"\[CQ:at,qq=(\d+)\]", raw_message)
-    
-    if matches:
-        group_id = data.get("group_id")
-        # 添加所有被 mention 的用户到白名单
-        for target_user_id in matches:
-            target_user_id = int(target_user_id)
-            if target_user_id != ADMIN_ACCOUNT:  # 不添加管理员自己
-                add_user_to_whitelist(group_id, target_user_id)
-        send_group_message(group_id, "收到")
-        return True
-    
-    return False
 
 
 def extract_reply_info(message_data):
@@ -400,15 +374,15 @@ def add_group_to_whitelist(group_id):
 
 
 def remove_group_from_whitelist(group_id):
-    """从白名单移除群号，同时清空该群的用户白名单"""
+    """从白名单移除群号，同时清除该群的对话历史"""
     if group_id in GROUP_WHITELIST:
         GROUP_WHITELIST.remove(group_id)
         print(f"✓ 已移除群 {group_id} 从群白名单")
         
-        # 清空该群的用户白名单
-        if group_id in USER_WHITELIST:
-            del USER_WHITELIST[group_id]
-            print(f"✓ 已清空群 {group_id} 的用户白名单")
+        # 清除该群的对话历史
+        if group_id in conversation_histories:
+            del conversation_histories[group_id]
+            print(f"✓ 已清除群 {group_id} 的对话历史")
         return True
     return False
 
@@ -474,59 +448,40 @@ def handle_message(data, responder):
                 remove_group_from_whitelist(group_id)
                 return
             
-            # ✅ 检查群号是否在白名单中（可选关闭）
-            if not IGNORE_WHITELIST and not is_group_whitelisted(group_id):
+            # ✅ 检查是否应该回复
+            # 如果忽略白名单或启用 REPLY_ALL 模式，直接回复所有群
+            # 否则只回复在白名单中的群
+            if not (IGNORE_WHITELIST or REPLY_ALL) and not is_group_whitelisted(group_id):
                 if not QUIET_MODE:
-                    print(f"   ❌ 群号不在白名单中，跳过处理")
+                    print(f"   ❌ 群号不在白名单中且未启用 REPLY_ALL，跳过处理")
+                return
+
+            # 随机概率判断
+            if random.random() > REPLY_PROBABILITY:
+                if not QUIET_MODE:
+                    print(f"   🎲 随机跳过回复（概率：{int(REPLY_PROBABILITY*100)}%）")
                 return
             
-            # ✅ 检查是否是管理员的添加白名单命令
-            if check_admin_command_add_whitelist(data):
-                if not QUIET_MODE:
-                    print(f"   ✓ 管理员已添加白名单用户")
-                return
+            # 构建包含回复上下文的完整消息
+            text_content = build_message_with_context(raw_message, message_data, user_id, sender_info)
             
-            # ✅ 检查用户是否在白名单中
-            in_whitelist = is_user_in_whitelist(group_id, user_id)
             if not QUIET_MODE:
-                print(f"   用户白名单检查: {in_whitelist}")
-
-            # 若启用暴力模式（回复所有消息），则无需白名单
-            should_reply = in_whitelist or REPLY_ALL
-
-            if should_reply:
-                # 随机概率判断：30%概率回复
-                import random
-                if random.random() > REPLY_PROBABILITY:
-                    if not QUIET_MODE:
-                        print(f"   🎲 随机跳过回复（概率：{int(REPLY_PROBABILITY*100)}%）")
-                    return
-                
-                # 构建包含回复上下文的完整消息
-                text_content = build_message_with_context(raw_message, message_data, user_id, sender_info)
-                
+                print(f"   ✅ 调用 LLM...")
+                print(f"   提取内容: {text_content}")
+            
+            # 使用群ID作为会话ID，这样同一个群的所有用户共享对话历史
+            reply = responder(group_id, text_content)
+            
+            if not QUIET_MODE:
+                print(f"   LLM 回复: {reply}")
+            
+            # 检查是否调用失败，若失败则不发送群消息
+            if reply.startswith("openrouter 调用失败") or reply.startswith("GPT 调用失败"):
                 if not QUIET_MODE:
-                    if in_whitelist:
-                        print(f"   ✅ 用户在白名单中，调用 LLM...")
-                    elif REPLY_ALL:
-                        print(f"   ✅ REPLYALL 模式已启用，调用 LLM...")
-                    print(f"   提取内容: {text_content}")
-                
-                reply = responder(f"group_{group_id}_{user_id}", text_content)
-                
-                if not QUIET_MODE:
-                    print(f"   LLM 回复: {reply}")
-                
-                # 检查是否调用失败，若失败则不发送群消息
-                if reply.startswith("openrouter 调用失败") or reply.startswith("GPT 调用失败"):
-                    if not QUIET_MODE:
-                        print(f"   ❌ API 调用失败，已拦截错误消息发送")
-                else:
-                    # 发送回复
-                    send_group_message(group_id, reply)
+                    print(f"   ❌ API 调用失败，已拦截错误消息发送")
             else:
-                if not QUIET_MODE:
-                    print(f"   ⏭️  用户不在白名单中，跳过处理")
+                # 发送回复
+                send_group_message(group_id, reply)
         
         elif msg_type == "private":
             # 私聊消息处理（私聊总是回复，不需要@）
@@ -589,6 +544,8 @@ async def main():
     parser.add_argument("--replyall", "--reply-all", dest="reply_all", action="store_true", help="回复所有群消息，无需 @ 提及")
     parser.add_argument("--ignore-whitelist", action="store_true", help="忽略群白名单，所有群都回复")
     parser.add_argument("--quiet", action="store_true", help="静默模式，减少控制台输出")
+    parser.add_argument("--delay-min", type=int, default=None, help="回复延迟最小值（毫秒），默认从环境变量 REPLY_DELAY_MIN 读取，否则为 10")
+    parser.add_argument("--delay-max", type=int, default=None, help="回复延迟最大值（毫秒），默认从环境变量 REPLY_DELAY_MAX 读取，否则为 100")
     args = parser.parse_args()
 
     if args.backend == "gpt":
@@ -604,6 +561,20 @@ async def main():
     IGNORE_WHITELIST = bool(args.ignore_whitelist)
     global QUIET_MODE
     QUIET_MODE = args.quiet
+    global REPLY_DELAY_MIN, REPLY_DELAY_MAX
+    if args.delay_min is not None:
+        REPLY_DELAY_MIN = args.delay_min
+    if args.delay_max is not None:
+        REPLY_DELAY_MAX = args.delay_max
+    
+    # 验证延迟范围
+    if REPLY_DELAY_MIN < 0:
+        REPLY_DELAY_MIN = 0
+    if REPLY_DELAY_MAX < REPLY_DELAY_MIN:
+        REPLY_DELAY_MAX = REPLY_DELAY_MIN
+    
+    if not QUIET_MODE:
+        print(f"⚙️  回复延迟范围: {REPLY_DELAY_MIN}-{REPLY_DELAY_MAX}ms")
     
     # MCP 连接自检：检查 MCP 服务是否在线（使用 streamable-http）
     mcp_available = False
