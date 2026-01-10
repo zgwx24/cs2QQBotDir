@@ -315,9 +315,37 @@ def get_llm_response(session_id, message, self_id=None, group_id=None):
         if not QUIET_MODE:
             print(f"   [DEBUG] 原始回复: {repr(reply)}")
 
-        # 移除思考过程 <think>...</think>
+        # 移除思考过程标签 <think>...</think>
         import re
         reply = re.sub(r'<think>.*?</think>', '', reply, flags=re.DOTALL).strip()
+        
+        # 如果回复包含明显的思考过程（模型直接输出思考内容而非使用标签），尝试提取最后一句短句作为实际回复
+        # 通常思考过程会很长，实际回复会简短（符合15字以内）
+        if len(reply) > 30:  # 如果回复很长，可能包含思考过程
+            lines = reply.split('\n')
+            # 如果有多行，从后往前找第一个短句（15字以内）且不包含明显的思考关键词
+            if len(lines) > 1:
+                for line in reversed(lines):
+                    line = line.strip()
+                    # 跳过空行
+                    if not line:
+                        continue
+                    # 如果是短句（15字以内）且不包含明显的思考过程关键词，使用它
+                    if len(line) <= 15 and not any(keyword in line for keyword in ['考虑到', '想到', '需要', '符合', '选择', '最符合', '可能', '用户', '应该', '可以', '给出']):
+                        reply = line
+                        break
+                else:
+                    # 如果没找到合适的短句，使用最后一行（即使它可能包含思考过程）
+                    reply = lines[-1].strip() if lines[-1].strip() else reply
+            else:
+                # 单行但很长，尝试提取最后一个短句（15字以内）
+                # 匹配最后一个标点符号后的短句，或直接取最后15个字符
+                match = re.search(r'[。！？]\s*([^。！？]{1,15})$', reply)
+                if match:
+                    reply = match.group(1).strip()
+                elif len(reply) > 15:
+                    # 如果没找到，使用最后15个字符（去除前导标点和空格）
+                    reply = re.sub(r'^[。！？\s]+', '', reply[-15:]).strip()
 
         # 保存助手回复到历史
         history.append({
@@ -908,25 +936,45 @@ def handle_message(data, responder):
             # 私聊消息处理（私聊总是回复，不需要@）
             user_id = data.get("user_id")
             raw_message = data.get("raw_message", "")
+            message_data = data.get("message", [])
+            sender_info = data.get("sender", {})  # 获取发送者信息
             self_id = data.get("self_id")  # 私聊也有 self_id
             
             if not QUIET_MODE:
                 print(f"💬 私信 来自用户 {user_id}:")
                 print(f"   内容: {raw_message}")
             
+            # 构建包含回复上下文的完整消息（私聊时 group_id 为 None）
+            text_content, is_bot, bot_nickname = build_message_with_context(raw_message, message_data, user_id, sender_info, group_id=None)
+            
+            # 检查是否是bot用户（私聊中通常不会有bot，但为了统一处理逻辑）
+            if is_bot:
+                # Bot 用户：保存到历史记录但不回复
+                if not QUIET_MODE:
+                    print(f"   🤖 检测到bot用户：{bot_nickname}，保存到历史但不回复")
+                # 检查消息中是否包含"大盘"关键词
+                extracted_text = extract_text_from_message(raw_message)
+                if "大盘" in extracted_text:
+                    market_info = fetch_market_index()
+                    text_content = f"{text_content}\n{market_info}"
+                # 添加消息到历史记录但不调用 LLM
+                add_message_to_history(f"private_{user_id}", text_content, self_id=self_id, group_id=None)
+                return
+            
             # 检查消息中是否包含"大盘"关键词
-            text_content = raw_message
-            if "大盘" in raw_message:
+            extracted_text = extract_text_from_message(raw_message)
+            if "大盘" in extracted_text:
                 if not QUIET_MODE:
                     print(f"   🔍 检测到'大盘'关键词，正在查询大盘信息...")
                 market_info = fetch_market_index()
                 # 将查询结果添加到消息中
-                text_content = f"{raw_message}\n{market_info}"
+                text_content = f"{text_content}\n{market_info}"
                 if not QUIET_MODE:
                     print(f"   📊 大盘信息: {market_info}")
             
             if not QUIET_MODE:
                 print(f"   调用 LLM...")
+                print(f"   提取内容: {text_content}")
             
             # 调用 LLM 获取回复
             # 对于私聊，group_id 为 None，只传递 self_id（用于获取QQ昵称）
