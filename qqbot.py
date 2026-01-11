@@ -67,7 +67,7 @@ bot_nickname = None  # 缓存机器人昵称
 REPLY_ALL = False
 IGNORE_WHITELIST = False
 QUIET_MODE = False
-REPLY_PROBABILITY = 0.3 #0.3  # 回复概率30%
+REPLY_PROBABILITY = 0.25 #0.3  # 回复概率30%
 # 回复延迟配置（毫秒）：从环境变量读取，默认 10-100ms
 REPLY_DELAY_MIN = int(os.getenv("REPLY_DELAY_MIN", "10"))
 REPLY_DELAY_MAX = int(os.getenv("REPLY_DELAY_MAX", "100"))
@@ -143,7 +143,7 @@ def build_system_prompt(self_id=None, group_id=None):
     
     # 如果有昵称，添加到 system prompt
     if nickname:
-        prompt = f"{prompt}\n\n你现在的昵称是：{nickname}"
+        prompt = f"{prompt}\n\n你现在的昵称是：{nickname}，不必重复你的昵称。"
     
     return prompt
 
@@ -515,6 +515,40 @@ def has_image(message_data):
     return False
 
 
+def get_image_description(message_data):
+    """获取图片的描述文本
+    
+    Args:
+        message_data: 消息数据数组
+    
+    Returns:
+        str: 图片描述文本，如"发了一个表情包"、"发了一个呲牙的表情包"、"发送了一张你看不了的图片"
+    """
+    if not isinstance(message_data, list):
+        return "发送了一张你看不了的图片"
+    
+    # 查找第一个图片
+    for item in message_data:
+        if item.get("type") == "image":
+            image_data = item.get("data", {})
+            summary = image_data.get("summary", "")
+            
+            # 如果是动画表情（表情图片）
+            if summary == "[动画表情]":
+                return "发了一个表情包"
+            
+            # 如果是其他表情包（如[呲牙]、[大笑]等）
+            if summary and summary.startswith("[") and summary.endswith("]"):
+                # 去掉方括号，获取表情名称
+                emoji_name = summary[1:-1]
+                return f"发了一个{emoji_name}的表情包"
+            
+            # 其他图片
+            return "发送了一张你看不了的图片"
+    
+    return "发送了一张你看不了的图片"
+
+
 def get_group_member_info_api(group_id, user_id):
     """通过 API 获取群成员信息（包括群昵称和昵称）
     
@@ -703,7 +737,8 @@ def build_message_with_context(raw_message, message_data, user_id, sender_info=N
     if is_bot:
         # 检测是否有图片
         if has_image(message_data):
-            message_content = f"群内bot{bot_nickname}：发送了一张你看不了的图片"
+            image_desc = get_image_description(message_data)
+            message_content = f"群内bot{bot_nickname}：{image_desc}"
         else:
             # 使用新函数提取文本，保留 mention 信息
             text_content = extract_text_with_mentions(raw_message, message_data, group_id)
@@ -715,7 +750,8 @@ def build_message_with_context(raw_message, message_data, user_id, sender_info=N
         # 普通用户，使用原有格式
         # 检测是否有图片
         if has_image(message_data):
-            message_content = f"{user_name}发送了一张你看不了的图片"
+            image_desc = get_image_description(message_data)
+            message_content = f"{user_name}{image_desc}"
         else:
             # 使用新函数提取文本，保留 mention 信息（优先使用群昵称，然后是昵称，最后是QQ号）
             text_content = extract_text_with_mentions(raw_message, message_data, group_id)
